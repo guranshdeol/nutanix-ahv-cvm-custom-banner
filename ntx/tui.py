@@ -157,7 +157,7 @@ def show_report(rows: list[ApplyResult]) -> None:
 
 
 def run_tui(root: Path) -> int:
-    remote_script = root / "remote" / "apply-umicore-banner.sh"
+    remote_script = root / "remote" / "apply-banner.sh"
     output_dir = root / "output"
 
     _banner("Nutanix SSH consent banner")

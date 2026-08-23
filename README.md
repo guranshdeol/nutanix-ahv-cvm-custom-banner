@@ -78,7 +78,7 @@ flowchart TD
   discover --> select["Pick clusters or ALL"]
   select --> gate{"AOS less than 7.6?"}
   gate -->|"no: 7.6+"| refuse["Refuse file-method banner"]
-  gate -->|"yes: 7.5.1 proceeds"| ssh["CVM SSH user and password"]
+  gate -->|"yes: AOS before 7.6"| ssh["CVM SSH user and password"]
   ssh --> mode{"WhatIf or Apply?"}
   mode -->|WhatIf| whatif["SSH to one CVM: read ncli and checksums, print plan"]
   mode -->|Apply| kind{"PE or PC?"}
@@ -96,29 +96,33 @@ flowchart TD
   refuse --> report
 ```
 
-The diamond is “AOS less than 7.6?” — **7.5.1 proceeds**, **7.6+ is refused**.
+The diamond is “AOS less than 7.6?” — **AOS before 7.6 proceeds**, **7.6+ is refused**.
 
 ## What it does
 
-Glean procedure for **AOS 7.5.1 / AHV 11.0.1**. The banner is the SSH
-**consent text before authentication**, not MOTD.
+This uses the Nutanix **file-method** SSH pre-auth banner (the text shown
+**before authentication**, not MOTD). It is supported on **AOS before 7.6**.
+AOS 7.6 and newer refuse this method (Nutanix deprecated the file edit).
 
-The workstation SSHs to **one CVM**. That CVM fans out.
+The workstation SSHs to **one CVM**. On a multi-CVM cluster that CVM fans
+out with `allssh` / `svmips` and `hostssh` / `hostips`. On a single-node
+cluster it only updates that CVM and that AHV.
 
-**PE** (AOS before 7.6):
+**Prism Element** (AOS before 7.6):
 
 1. `ncli cluster edit-cvm-security-params enable-banner=false`
 2. `ncli cluster edit-hypervisor-security-params enable-banner=false`
-3. `allssh` backup `/srv/salt/security/CVM/sshd/DODbanner` → `DODbannerbak`
-4. `hostssh` backup `/etc/puppet/modules/kvm/files/issue.DoD` → `issue.DoD.bak`
-5. Stage your file onto the CVM Salt path (`svmips`)
-6. Stage the same file onto the AHV Puppet path (`hostips`)
+3. Backup `/srv/salt/security/CVM/sshd/DODbanner` → `DODbannerbak`
+4. Backup `/etc/puppet/modules/kvm/files/issue.DoD` → `issue.DoD.bak`
+5. Stage your file onto the CVM Salt path
+6. Stage the same file onto the AHV Puppet path
 7. Re-enable both ncli banners
 
 **Prism Central** (no AHV): CVM ncli disable → backup Salt `DODbanner` →
 stage that file → CVM ncli enable.
 
-**AOS 7.6 and newer** is refused (file edits are deprecated).
+`DODbanner` and `issue.DoD` are the AOS filenames. Your banner **content**
+is whatever file you point the TUI at.
 
 ## TUI screens
 
@@ -142,6 +146,6 @@ banner.py                 Python TUI entry
 banner.ps1                PowerShell TUI entry
 ntx/                      Python engine
 NtnxBanner/               PowerShell engine
-remote/apply-umicore-banner.sh   Runs on the CVM
+remote/apply-banner.sh           Runs on the CVM
 requirements.txt
 ```

@@ -2,6 +2,13 @@
 # Runs ON a CVM (or PC VM). Kind and mode are arguments.
 #   $1 = whatif | apply
 #   $2 = PE | PC
+# Non-login SSH has a bare PATH; load the CVM tool locations first.
+if [ -f /etc/profile ]; then
+  set +u
+  # shellcheck disable=SC1091
+  . /etc/profile
+fi
+export PATH="/home/nutanix/prism/cli:/usr/local/nutanix/cluster/bin:/usr/local/nutanix/bin:${PATH:-/usr/bin:/bin}"
 set -u
 MODE="${1:-apply}"
 KIND="${2:-PE}"
@@ -11,24 +18,45 @@ CVM_BAK="/srv/salt/security/CVM/sshd/DODbannerbak"
 AHV_DST="/etc/puppet/modules/kvm/files/issue.DoD"
 AHV_BAK="/etc/puppet/modules/kvm/files/issue.DoD.bak"
 
-cvm_backup_cmd() {
-  if command -v allssh >/dev/null 2>&1; then
-    allssh "sudo test -f $CVM_BAK || sudo cp -a $CVM_DST $CVM_BAK"
-  else
-    sudo test -f "$CVM_BAK" || sudo cp -a "$CVM_DST" "$CVM_BAK"
+cvm_ip_list() {
+  if command -v svmips >/dev/null 2>&1; then
+    svmips
   fi
 }
 
+cvm_count() {
+  # shellcheck disable=SC2046
+  set -- $(cvm_ip_list)
+  echo "$#"
+}
+
+# Single-node PE: allssh/svmips only see this CVM. Copy locally.
+# Multi-CVM: allssh if present, otherwise ssh/scp to each svmips address.
+cvm_backup_cmd() {
+  if command -v allssh >/dev/null 2>&1; then
+    allssh "sudo test -f $CVM_BAK || sudo cp -a $CVM_DST $CVM_BAK"
+    return
+  fi
+  if [ "$(cvm_count)" -gt 1 ]; then
+    for i in $(cvm_ip_list); do
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" \
+        "sudo test -f $CVM_BAK || sudo cp -a $CVM_DST $CVM_BAK"
+    done
+    return
+  fi
+  sudo test -f "$CVM_BAK" || sudo cp -a "$CVM_DST" "$CVM_BAK"
+}
+
 cvm_stage_cmd() {
-  if command -v svmips >/dev/null 2>&1; then
-    for i in $(svmips); do
+  if [ "$(cvm_count)" -gt 1 ]; then
+    for i in $(cvm_ip_list); do
       scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$BANNER_SRC" "$i:$HOME/tmp/DODbanner"
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" "sudo cp \$HOME/tmp/DODbanner $CVM_DST; sudo chown root:root $CVM_DST"
     done
-  else
-    sudo cp "$BANNER_SRC" "$CVM_DST"
-    sudo chown root:root "$CVM_DST"
+    return
   fi
+  sudo cp "$BANNER_SRC" "$CVM_DST"
+  sudo chown root:root "$CVM_DST"
 }
 
 do_ahv_backup() {
@@ -82,9 +110,9 @@ if [ "$MODE" = "whatif" ]; then
   echo "ncli cluster edit-cvm-security-params enable-banner=false"
   if [ "$KIND" = "PE" ]; then
     echo "ncli cluster edit-hypervisor-security-params enable-banner=false"
-    echo "allssh backup CVM DODbanner"
+    echo "backup CVM DODbanner (allssh, or this CVM on a single-node)"
     echo "hostssh backup AHV issue.DoD"
-    echo "stage CVM Salt + AHV Puppet"
+    echo "stage CVM Salt + AHV Puppet (this CVM / this AHV on a single-node)"
     echo "ncli enable-banner=true (CVM + AHV)"
   else
     echo "backup CVM DODbanner"
@@ -119,10 +147,12 @@ echo "=== AHV ncli (after) ==="
 read_ahv_ncli
 echo "=== checksums (after) ==="
 md5sum "$CVM_DST" 2>/dev/null || echo "CVM file missing"
-if command -v svmips >/dev/null 2>&1; then
-  for i in $(svmips); do
+if [ "$(cvm_count)" -gt 1 ]; then
+  for i in $(cvm_ip_list); do
     echo "CVM $i $(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" "md5sum $CVM_DST 2>/dev/null || echo missing")"
   done
+else
+  echo "CVM this-node $(md5sum "$CVM_DST" 2>/dev/null || echo missing)"
 fi
 verify_ahv
 echo "=== DONE ==="

@@ -29,7 +29,7 @@ function Invoke-NtnxBannerOnCluster {
         return [PSCustomObject]$result
     }
 
-    $remoteScript = Join-Path (Join-Path $script:NtnxBannerRoot 'remote') 'apply-umicore-banner.sh'
+    $remoteScript = Join-Path (Join-Path $script:NtnxBannerRoot 'remote') 'apply-banner.sh'
     if (-not (Test-Path -LiteralPath $remoteScript)) {
         $result.Detail = "Remote script missing: $remoteScript"
         return [PSCustomObject]$result
@@ -52,7 +52,7 @@ function Invoke-NtnxBannerOnCluster {
         $work = Join-Path ([IO.Path]::GetTempPath()) ('ntnx-banner-' + [guid]::NewGuid().ToString('n'))
         $null = New-Item -ItemType Directory -Path $work -Force
         $localBanner = Join-Path $work 'DODbanner'
-        $localScript = Join-Path $work 'apply-umicore-banner.sh'
+        $localScript = Join-Path $work 'apply-banner.sh'
         Copy-Item -LiteralPath $BannerFile -Destination $localBanner -Force
         Copy-Item -LiteralPath $remoteScript -Destination $localScript -Force
 
@@ -62,7 +62,7 @@ function Invoke-NtnxBannerOnCluster {
 
         $mode = if ($WhatIf) { 'whatif' } else { 'apply' }
         $run = Invoke-NtnxCvmCommand -HostName $Target.SshHost -User $SshUser -Password $SshPassword -TimeoutSec 300 -Command (
-            'chmod +x "$HOME/tmp/apply-umicore-banner.sh" && bash "$HOME/tmp/apply-umicore-banner.sh" ' + $mode + ' ' + $Target.Kind
+            'chmod +x "$HOME/tmp/apply-banner.sh" && bash "$HOME/tmp/apply-banner.sh" ' + $mode + ' ' + $Target.Kind
         )
 
         $result.Detail = $run.Output

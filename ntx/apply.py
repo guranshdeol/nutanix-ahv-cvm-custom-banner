@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import shlex
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +12,7 @@ import paramiko
 from ntx.common import log
 from ntx.discover import BannerTarget
 
-_REMOTE_SCRIPT_NAME = "apply-umicore-banner.sh"
+_REMOTE_SCRIPT_NAME = "apply-banner.sh"
 
 
 @dataclass
@@ -38,19 +40,54 @@ def _connect(host: str, user: str, password: str, timeout: int = 30) -> paramiko
 
 
 def _run(client: paramiko.SSHClient, command: str, timeout: int = 300) -> tuple[int, str]:
-    stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-    out = stdout.read().decode("utf-8", errors="replace")
-    err = stderr.read().decode("utf-8", errors="replace")
-    code = stdout.channel.recv_exit_status()
-    return code, (out + err).strip()
+    last: Exception | None = None
+    for attempt in range(4):
+        try:
+            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+            try:
+                out = stdout.read().decode("utf-8", errors="replace")
+                err = stderr.read().decode("utf-8", errors="replace")
+                code = stdout.channel.recv_exit_status()
+                return code, (out + err).strip()
+            finally:
+                stdin.close()
+                stdout.close()
+                stderr.close()
+        except paramiko.ssh_exception.ChannelException as exc:
+            last = exc
+            time.sleep(0.6 * (attempt + 1))
+    raise last or RuntimeError("SSH exec failed")
 
 
-def _sftp_put(client: paramiko.SSHClient, local: Path, remote: str) -> None:
-    sftp = client.open_sftp()
-    try:
-        sftp.put(str(local), remote)
-    finally:
-        sftp.close()
+def _put_file(client: paramiko.SSHClient, local: Path, remote: str) -> None:
+    """Write a local file onto the CVM over the exec channel.
+
+    These CVMs accept SSH exec but reject the SFTP subsystem
+    (ChannelException: Connect failed). Do not open SFTP first — a failed
+    subsystem open also burns the tight MaxSessions limit.
+    """
+    data = local.read_bytes()
+    quoted = remote.replace("'", "'\\''")
+    last: Exception | None = None
+    for attempt in range(4):
+        try:
+            stdin, stdout, stderr = client.exec_command(f"cat > '{quoted}'")
+            try:
+                stdin.channel.sendall(data)
+                stdin.channel.shutdown_write()
+                code = stdout.channel.recv_exit_status()
+                if code != 0:
+                    err = (stdout.read() + stderr.read()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"upload {remote} failed: {err.strip()}")
+                return
+            finally:
+                stdin.close()
+                stdout.close()
+                stderr.close()
+        except paramiko.ssh_exception.ChannelException as exc:
+            last = exc
+            time.sleep(0.6 * (attempt + 1))
+    raise last or RuntimeError(f"upload {remote} failed")
 
 
 def apply_banner(
@@ -89,15 +126,14 @@ def apply_banner(
             return result
         home = out.strip() or "/home/nutanix"
         remote_tmp = f"{home}/tmp"
-        _run(client, f'mkdir -p "{remote_tmp}"')
-        _sftp_put(client, banner_file, f"{remote_tmp}/DODbanner")
-        _sftp_put(client, remote_script, f"{remote_tmp}/{_REMOTE_SCRIPT_NAME}")
-        code, out = _run(
-            client,
-            f'chmod +x "{remote_tmp}/{_REMOTE_SCRIPT_NAME}" && '
-            f'bash "{remote_tmp}/{_REMOTE_SCRIPT_NAME}" {mode} {target.kind}',
-            timeout=300,
+        _put_file(client, banner_file, f"{remote_tmp}/DODbanner")
+        _put_file(client, remote_script, f"{remote_tmp}/{_REMOTE_SCRIPT_NAME}")
+        remote_script_path = f"{remote_tmp}/{_REMOTE_SCRIPT_NAME}"
+        inner = (
+            f"chmod +x {shlex.quote(remote_script_path)} && "
+            f"bash {shlex.quote(remote_script_path)} {mode} {target.kind}"
         )
+        code, out = _run(client, f"bash -lc {shlex.quote(inner)}", timeout=300)
         result.detail = out
         result.status = ("whatif" if what_if else "changed") if code == 0 else "failed"
         return result
