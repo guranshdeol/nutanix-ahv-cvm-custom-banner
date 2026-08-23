@@ -22,21 +22,25 @@ There is no unattended / flag / CSV mode. The launcher starts a TUI.
 
 ### Dependencies
 
-The launcher **checks first**. If packages are already there, it starts the
-TUI with no prompt.
+The launcher **checks first**. If Python 3 and packages are already there, it
+starts the TUI with no prompt.
 
 If something is missing it shows a **disclaimer** and asks Y/N:
 
-- **Python Yes:** creates a local `.venv` and `pip install -r requirements.txt`.
-  Does not install the Python interpreter or change system Python.
+- **Python Yes:** installs Python 3 if it is missing, then creates a local
+  `.venv` and `pip install -r requirements.txt`.
+  - Windows: `winget` (Python.Python.3.12), or the official python.org
+    silent installer for this user (PATH + pip).
+  - Linux: `apt` / `dnf` / `yum` / `zypper` (needs sudo or root).
+  - macOS: Homebrew `brew install python3`.
 - **PowerShell Yes (Windows, only if `ssh`/`scp` are missing):**
   `Install-Module Posh-SSH -Scope CurrentUser`.
   If OpenSSH is already present, PowerShell starts with no install.
 
 Answer **N** and the launcher stops and lists what is missing.
 
-You must already have **Python 3** (for the Python engine) or **PowerShell**
-(Windows engine). The launcher will not install those.
+The launcher does not install PowerShell itself. It will install Python 3
+and the project packages when you answer Yes.
 
 ## Flow
 
@@ -55,9 +59,9 @@ flowchart TD
   checkPs --> readyPs{"Deps OK?"}
   readyPy -->|yes| tui["Start TUI"]
   readyPs -->|yes| tui
-  readyPy -->|no| askPy["Disclaimer: create .venv and pip install?"]
+  readyPy -->|no| askPy["Disclaimer: install Python 3 if needed, then venv and pip?"]
   readyPs -->|no| askPs["Disclaimer: Install-Module Posh-SSH?"]
-  askPy -->|yes| instPy["Create .venv and pip install"]
+  askPy -->|yes| instPy["Install Python 3 if missing, create .venv, pip install"]
   askPy -->|no| stop["Stop and list what is missing"]
   askPs -->|yes| instPs["Install-Module Posh-SSH CurrentUser"]
   askPs -->|no| stop

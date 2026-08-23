@@ -23,24 +23,65 @@ function Read-YesNo {
     }
 }
 
+function Update-SessionPath {
+    $machine = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $parts = @($machine, $user) | Where-Object { $_ }
+    if ($parts) { $env:Path = [string]::Join(';', $parts) }
+}
+
+function Test-PythonExe {
+    param([string]$Exe)
+    if (-not $Exe) { return $false }
+    if (-not (Test-Path -LiteralPath $Exe)) { return $false }
+    try {
+        $ver = & $Exe -c "import sys; print(sys.version_info[0])" 2>$null
+        return ($ver -eq '3')
+    }
+    catch { return $false }
+}
+
 function Find-Python {
-    foreach ($name in @('python', 'python3', 'py')) {
+    Update-SessionPath
+
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        try {
+            $resolved = & $pyLauncher.Source -3 -c "import sys; print(sys.executable)" 2>$null
+            if ($resolved) {
+                $exe = ([string]$resolved).Trim()
+                if (Test-PythonExe $exe) { return $exe }
+            }
+        }
+        catch { }
+    }
+
+    foreach ($name in @('python', 'python3')) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
         if (-not $cmd) { continue }
-        $exe = $cmd.Source
-        # Windows Store alias can exist but fail.
-        try {
-            $ver = & $exe -c "import sys; print(sys.version_info[0])" 2>$null
-            if ($ver -eq '3') { return $exe }
+        if (Test-PythonExe $cmd.Source) { return $cmd.Source }
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $userRoot = Join-Path $env:LocalAppData 'Programs\Python'
+    if (Test-Path -LiteralPath $userRoot) {
+        Get-ChildItem -LiteralPath $userRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $candidates.Add((Join-Path $_.FullName 'python.exe'))
         }
-        catch { continue }
+    }
+    foreach ($n in @('Python313', 'Python312', 'Python311', 'Python310')) {
+        $candidates.Add((Join-Path (Join-Path $env:ProgramFiles $n) 'python.exe'))
+    }
+
+    foreach ($exe in $candidates) {
+        if (Test-PythonExe $exe) { return $exe }
     }
     return $null
 }
 
 function Test-PythonDeps {
     param([string]$Exe)
-    if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) { return $false }
+    if (-not (Test-PythonExe $Exe)) { return $false }
     & $Exe -c "import requests, paramiko" 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
@@ -49,6 +90,72 @@ function Start-PythonTui {
     param([string]$Exe)
     & $Exe (Join-Path $Root 'banner.py')
     exit $LASTEXITCODE
+}
+
+function Install-PythonInterpreter {
+    Write-Host 'Installing Python 3 ...'
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host '  Trying winget (Python.Python.3.12) ...'
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & $winget.Source install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements --disable-interactivity
+        $ErrorActionPreference = $prev
+        $found = Find-Python
+        if ($found) { return $found }
+        Write-Host '  winget did not leave a working python.exe. Trying python.org installer ...'
+    }
+
+    $rel = '3.12.10'
+    $file = 'python-3.12.10-amd64.exe'
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+        $file = 'python-3.12.10-arm64.exe'
+    }
+    elseif ($env:PROCESSOR_ARCHITECTURE -eq 'x86' -and -not [Environment]::Is64BitOperatingSystem) {
+        $file = 'python-3.12.10.exe'
+    }
+
+    $url = "https://www.python.org/ftp/python/$rel/$file"
+    $dest = Join-Path $env:TEMP $file
+    Write-Host "  Downloading $url ..."
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+
+    Write-Host '  Silent install (this user, add to PATH, include pip) ...'
+    $proc = Start-Process -FilePath $dest -ArgumentList @(
+        '/quiet',
+        'InstallAllUsers=0',
+        'PrependPath=1',
+        'Include_pip=1',
+        'Include_test=0',
+        'SimpleInstall=1'
+    ) -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        Write-Host "  Python installer failed with exit code $($proc.ExitCode)." -ForegroundColor Red
+        return $null
+    }
+
+    return (Find-Python)
+}
+
+function Install-PythonVenv {
+    param([string]$Py)
+    $venvDir = Join-Path $Root '.venv'
+    $venvPy = Join-Path $venvDir 'Scripts\python.exe'
+    Write-Host "  Creating venv at $venvDir ..."
+    & $Py -m venv $venvDir
+    if (-not (Test-Path -LiteralPath $venvPy)) {
+        Write-Host 'venv was not created. Check the Python install above.' -ForegroundColor Red
+        exit 1
+    }
+    & $venvPy -m pip install --upgrade pip
+    & $venvPy -m pip install -r (Join-Path $Root 'requirements.txt')
+    if (-not (Test-PythonDeps $venvPy)) {
+        Write-Host 'Install finished but imports still fail. Check pip output above.' -ForegroundColor Red
+        exit 1
+    }
+    return $venvPy
 }
 
 function Test-OpenSsh {
@@ -67,42 +174,44 @@ function Start-PowerShellTui {
 }
 
 function Invoke-PythonPath {
-    $py = Find-Python
-    if (-not $py) {
-        Write-Host 'Python 3 is not installed. Install Python 3, then run this launcher again.' -ForegroundColor Yellow
-        Write-Host 'This launcher does not install the Python interpreter.'
-        exit 1
-    }
-
     $venvPy = Join-Path $Root '.venv\Scripts\python.exe'
     if (Test-PythonDeps $venvPy) { Start-PythonTui $venvPy }
-    if (Test-PythonDeps $py) { Start-PythonTui $py }
 
-    Write-Host 'Python packages are missing (need: requests, urllib3, paramiko).'
+    $py = Find-Python
+    if ($py -and (Test-PythonDeps $py)) { Start-PythonTui $py }
+
+    $needInterpreter = -not $py
+    Write-Host 'Python runtime or packages are missing (need: Python 3, requests, urllib3, paramiko).'
     Write-Host ''
     Write-Host 'DISCLAIMER' -ForegroundColor Yellow
-    Write-Host '  If you continue, this launcher will create a local virtual environment'
-    Write-Host "  at: $(Join-Path $Root '.venv')"
-    Write-Host '  and run: pip install -r requirements.txt'
-    Write-Host '  System Python is not modified. The Python interpreter is not installed.'
+    Write-Host '  If you continue, this launcher will:'
+    if ($needInterpreter) {
+        Write-Host '    - Download and install Python 3 (winget, or the official python.org installer)'
+    }
+    Write-Host "    - Create a local virtual environment at: $(Join-Path $Root '.venv')"
+    Write-Host '    - Run: pip install -r requirements.txt'
+    Write-Host '  That downloads software from the internet.'
     Write-Host ''
-    if (-not (Read-YesNo 'Install project dependencies now?' $false)) {
-        Write-Host 'Stopped. Missing: a venv (or current Python) with requests and paramiko.'
+    if (-not (Read-YesNo 'Install missing Python / packages now?' $false)) {
+        Write-Host 'Stopped. Missing: Python 3 and/or a venv with requests and paramiko.'
         exit 1
     }
 
-    $venvDir = Join-Path $Root '.venv'
-    & $py -m venv $venvDir
-    & $venvPy -m pip install --upgrade pip
-    & $venvPy -m pip install -r (Join-Path $Root 'requirements.txt')
-    if (-not (Test-PythonDeps $venvPy)) {
-        Write-Host 'Install finished but imports still fail. Check pip output above.' -ForegroundColor Red
-        exit 1
+    if ($needInterpreter) {
+        $py = Install-PythonInterpreter
+        if (-not $py) {
+            Write-Host 'Could not install Python 3. Install it from https://www.python.org , open a new PowerShell, then run this launcher again.' -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "  Using $py"
     }
+
+    $venvPy = Install-PythonVenv -Py $py
     Start-PythonTui $venvPy
 }
 
 function Invoke-PowerShellPath {
+    Update-SessionPath
     if (Test-OpenSsh) {
         Start-PowerShellTui
     }
@@ -113,7 +222,7 @@ function Invoke-PowerShellPath {
     Write-Host 'Neither OpenSSH (ssh/scp) nor the Posh-SSH module is available.'
     Write-Host ''
     Write-Host 'DISCLAIMER' -ForegroundColor Yellow
-    Write-Host '  If you continue, this launcher will run:'
+    Write-Host '  If you continue, this launcher will:'
     Write-Host '    Install-Module Posh-SSH -Scope CurrentUser'
     Write-Host '  That downloads a PowerShell Gallery module for your user account.'
     Write-Host '  It does not install Windows OpenSSH or PowerShell itself.'
