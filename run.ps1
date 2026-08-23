@@ -82,8 +82,20 @@ function Find-Python {
 function Test-PythonDeps {
     param([string]$Exe)
     if (-not (Test-PythonExe $Exe)) { return $false }
-    & $Exe -c "import requests, paramiko" 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    # Missing pip packages write a traceback to stderr. With ErrorActionPreference
+    # Stop, PowerShell turns that into a terminating NativeCommandError.
+    $prev = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Exe -c "import requests, paramiko" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $ErrorActionPreference = $prev
+    }
 }
 
 function Start-PythonTui {
