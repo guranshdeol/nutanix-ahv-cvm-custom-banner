@@ -156,18 +156,20 @@ function Install-PythonVenv {
     $venvDir = Join-Path $Root '.venv'
     $venvPy = Join-Path $venvDir 'Scripts\python.exe'
     Write-Host "  Creating venv at $venvDir ..."
-    & $Py -m venv $venvDir
+    # Native stdout is on the success stream; without Out-Host it becomes
+    # the function return value and Start-PythonTui gets a pip log blob.
+    & $Py -m venv $venvDir | Out-Host
     if (-not (Test-Path -LiteralPath $venvPy)) {
         Write-Host 'venv was not created. Check the Python install above.' -ForegroundColor Red
         exit 1
     }
-    & $venvPy -m pip install --upgrade pip
-    & $venvPy -m pip install -r (Join-Path $Root 'requirements.txt')
+    & $venvPy -m pip install --upgrade pip | Out-Host
+    & $venvPy -m pip install -r (Join-Path $Root 'requirements.txt') | Out-Host
     if (-not (Test-PythonDeps $venvPy)) {
         Write-Host 'Install finished but imports still fail. Check pip output above.' -ForegroundColor Red
         exit 1
     }
-    return $venvPy
+    return [string]$venvPy
 }
 
 function Test-OpenSsh {
