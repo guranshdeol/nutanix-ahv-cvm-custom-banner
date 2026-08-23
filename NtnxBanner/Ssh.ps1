@@ -25,6 +25,11 @@ function Invoke-NtnxCvmCommand {
 
     $plain = ConvertTo-NtnxPlainPassword -Secure $Password
     try {
+        # Prefer OpenSSH. These CVMs reject the SFTP subsystem that Posh-SSH/scp use.
+        if (Get-Command ssh -ErrorAction SilentlyContinue) {
+            return Invoke-NtnxOpenSshCommand -HostName $HostName -User $User -PlainPassword $plain -Command $Command -TimeoutSec $TimeoutSec
+        }
+
         if (Test-NtnxPoshSsh) {
             Import-Module Posh-SSH -ErrorAction Stop
             $cred = New-Object System.Management.Automation.PSCredential ($User, $Password)
@@ -41,7 +46,7 @@ function Invoke-NtnxCvmCommand {
             }
         }
 
-        return Invoke-NtnxOpenSshCommand -HostName $HostName -User $User -PlainPassword $plain -Command $Command -TimeoutSec $TimeoutSec
+        throw 'Neither the OpenSSH client (ssh) nor Posh-SSH is available.'
     }
     finally {
         $plain = $null
@@ -60,14 +65,17 @@ function Copy-NtnxFileToCvm {
 
     $plain = ConvertTo-NtnxPlainPassword -Secure $Password
     try {
-        if (Test-NtnxPoshSsh) {
-            Import-Module Posh-SSH -ErrorAction Stop
-            $cred = New-Object System.Management.Automation.PSCredential ($User, $Password)
-            Set-SCPItem -ComputerName $HostName -Credential $cred -Path $LocalPath -Destination $RemotePath -AcceptKey -Force -ErrorAction Stop
+        if (Get-Command ssh -ErrorAction SilentlyContinue) {
+            Invoke-NtnxOpenSshCopy -HostName $HostName -User $User -PlainPassword $plain -LocalPath $LocalPath -RemotePath $RemotePath
             return
         }
 
-        Invoke-NtnxOpenSshCopy -HostName $HostName -User $User -PlainPassword $plain -LocalPath $LocalPath -RemotePath $RemotePath
+        if (Test-NtnxPoshSsh) {
+            Copy-NtnxFileToCvmViaPoshExec -HostName $HostName -User $User -Password $Password -LocalPath $LocalPath -RemotePath $RemotePath
+            return
+        }
+
+        throw 'Neither the OpenSSH client (ssh) nor Posh-SSH is available.'
     }
     finally {
         $plain = $null
@@ -118,7 +126,11 @@ function Invoke-NtnxOpenSshCommand {
     $prevAsk = $env:SSH_ASKPASS
     $prevReq = $env:SSH_ASKPASS_REQUIRE
     $prevDisp = $env:DISPLAY
+    $prevEap = $ErrorActionPreference
     try {
+        # ssh prints the host-key warning and the CVM pre-auth banner on stderr.
+        # With $ErrorActionPreference=Stop that becomes NativeCommandError.
+        $ErrorActionPreference = 'Continue'
         $env:SSH_ASKPASS = $helper.FullName
         $env:SSH_ASKPASS_REQUIRE = 'force'
         if (-not $env:DISPLAY) { $env:DISPLAY = 'none' }
@@ -132,13 +144,16 @@ function Invoke-NtnxOpenSshCommand {
             "${User}@${HostName}",
             $Command
         )
-        $output = & $ssh.Source @args 2>&1 | Out-String
+        $outputLines = & $ssh.Source @args 2>&1 | ForEach-Object { $_.ToString() }
+        $code = [int]$LASTEXITCODE
+        $output = ($outputLines -join "`n").Trim()
         return [PSCustomObject]@{
-            ExitStatus = [int]$LASTEXITCODE
-            Output     = $output.Trim()
+            ExitStatus = $code
+            Output     = $output
         }
     }
     finally {
+        $ErrorActionPreference = $prevEap
         $env:SSH_ASKPASS = $prevAsk
         $env:SSH_ASKPASS_REQUIRE = $prevReq
         $env:DISPLAY = $prevDisp
@@ -155,9 +170,9 @@ function Invoke-NtnxOpenSshCopy {
         [string]$RemotePath
     )
 
-    $scp = Get-Command scp -ErrorAction SilentlyContinue
-    if (-not $scp) {
-        throw 'Neither Posh-SSH nor the OpenSSH client (scp) is available.'
+    $ssh = Get-Command ssh -ErrorAction SilentlyContinue
+    if (-not $ssh) {
+        throw 'OpenSSH client (ssh) is not available for file upload.'
     }
 
     $askDir = New-NtnxAskPass -PlainPassword $PlainPassword
@@ -170,18 +185,26 @@ function Invoke-NtnxOpenSshCopy {
         $env:SSH_ASKPASS_REQUIRE = 'force'
         if (-not $env:DISPLAY) { $env:DISPLAY = 'none' }
 
-        $dest = "${User}@${HostName}:$RemotePath"
+        # scp uses the SFTP subsystem; these CVMs return "subsystem request failed".
+        # Write the file over an exec channel, same as the Python engine.
+        # RemotePath is expanded by the remote shell (pass $HOME/tmp/..., do not
+        # parse ssh client stderr into a local path).
+        $remoteCat = 'cat > "' + $RemotePath + '"'
         $args = @(
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'UserKnownHostsFile=/dev/null',
             '-o', 'PreferredAuthentications=password',
             '-o', 'PubkeyAuthentication=no',
-            $LocalPath,
-            $dest
+            "${User}@${HostName}",
+            $remoteCat
         )
-        $output = & $scp.Source @args 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "scp failed: $output"
+        $errFile = Join-Path $askDir 'scp.err'
+        $outFile = Join-Path $askDir 'scp.out'
+        $proc = Start-Process -FilePath $ssh.Source -ArgumentList $args -RedirectStandardInput $LocalPath -RedirectStandardError $errFile -RedirectStandardOutput $outFile -Wait -PassThru -NoNewWindow
+        $err = ''
+        if (Test-Path -LiteralPath $errFile) { $err = [string](Get-Content -LiteralPath $errFile -Raw) }
+        if ($proc.ExitCode -ne 0) {
+            throw "ssh upload failed: $err"
         }
     }
     finally {
@@ -189,5 +212,30 @@ function Invoke-NtnxOpenSshCopy {
         $env:SSH_ASKPASS_REQUIRE = $prevReq
         $env:DISPLAY = $prevDisp
         Remove-Item -LiteralPath $askDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Copy-NtnxFileToCvmViaPoshExec {
+    param(
+        [string]$HostName,
+        [string]$User,
+        [securestring]$Password,
+        [string]$LocalPath,
+        [string]$RemotePath
+    )
+
+    Import-Module Posh-SSH -ErrorAction Stop
+    $cred = New-Object System.Management.Automation.PSCredential ($User, $Password)
+    $sess = New-SSHSession -ComputerName $HostName -Credential $cred -AcceptKey -Force -ErrorAction Stop
+    try {
+        $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($LocalPath))
+        $cmd = "printf '%s' '$b64' | base64 -d > `"$RemotePath`""
+        $r = Invoke-SSHCommand -SSHSession $sess -Command $cmd
+        if ($r.ExitStatus -ne 0) {
+            throw "Posh-SSH upload failed: $(($r.Error | Out-String).Trim())"
+        }
+    }
+    finally {
+        $null = Remove-SSHSession -SSHSession $sess
     }
 }

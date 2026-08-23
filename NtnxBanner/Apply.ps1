@@ -38,31 +38,21 @@ function Invoke-NtnxBannerOnCluster {
     try {
         Write-NtnxLog ('{0} {1} ({2}) via {3}' -f $(if ($WhatIf) { 'WhatIf' } else { 'Apply' }), $Target.Name, $Target.Kind, $Target.SshHost)
 
-        $prep = Invoke-NtnxCvmCommand -HostName $Target.SshHost -User $SshUser -Password $SshPassword -Command 'mkdir -p "$HOME/tmp" && echo OK'
-        if ($prep.ExitStatus -ne 0) {
-            $result.Detail = "SSH failed: $($prep.Output)"
+        $prep = Invoke-NtnxCvmCommand -HostName $Target.SshHost -User $SshUser -Password $SshPassword -Command 'mkdir -p "$HOME/tmp" && echo NTNX_SSH_OK'
+        $prepOut = [string]$prep.Output
+        if ($prep.ExitStatus -ne 0 -or $prepOut -notmatch 'NTNX_SSH_OK') {
+            $result.Detail = "SSH failed: $prepOut"
             return [PSCustomObject]$result
         }
 
-        $home = Invoke-NtnxCvmCommand -HostName $Target.SshHost -User $SshUser -Password $SshPassword -Command 'printf %s "$HOME"'
-        $remoteTmp = ($home.Output.Trim() + '/tmp')
-        if (-not $home.Output.Trim()) { $remoteTmp = '/home/nutanix/tmp' }
-
-        # Posh-SSH Set-SCPItem wants a remote directory; keep local names stable.
-        $work = Join-Path ([IO.Path]::GetTempPath()) ('ntnx-banner-' + [guid]::NewGuid().ToString('n'))
-        $null = New-Item -ItemType Directory -Path $work -Force
-        $localBanner = Join-Path $work 'DODbanner'
-        $localScript = Join-Path $work 'apply-banner.sh'
-        Copy-Item -LiteralPath $BannerFile -Destination $localBanner -Force
-        Copy-Item -LiteralPath $remoteScript -Destination $localScript -Force
-
-        Copy-NtnxFileToCvm -HostName $Target.SshHost -User $SshUser -Password $SshPassword -LocalPath $localBanner -RemotePath $remoteTmp
-        Copy-NtnxFileToCvm -HostName $Target.SshHost -User $SshUser -Password $SshPassword -LocalPath $localScript -RemotePath $remoteTmp
-        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        # Expand $HOME on the CVM. Do not build a path from ssh client stderr
+        # (host-key warning + pre-auth banner are merged by 2>&1).
+        Copy-NtnxFileToCvm -HostName $Target.SshHost -User $SshUser -Password $SshPassword -LocalPath $BannerFile -RemotePath '$HOME/tmp/DODbanner'
+        Copy-NtnxFileToCvm -HostName $Target.SshHost -User $SshUser -Password $SshPassword -LocalPath $remoteScript -RemotePath '$HOME/tmp/apply-banner.sh'
 
         $mode = if ($WhatIf) { 'whatif' } else { 'apply' }
         $run = Invoke-NtnxCvmCommand -HostName $Target.SshHost -User $SshUser -Password $SshPassword -TimeoutSec 300 -Command (
-            'chmod +x "$HOME/tmp/apply-banner.sh" && bash "$HOME/tmp/apply-banner.sh" ' + $mode + ' ' + $Target.Kind
+            'bash -lc ''chmod +x "$HOME/tmp/apply-banner.sh" && bash "$HOME/tmp/apply-banner.sh" ' + $mode + ' ' + $Target.Kind + ''''
         )
 
         $result.Detail = $run.Output

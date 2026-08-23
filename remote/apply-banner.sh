@@ -66,10 +66,12 @@ do_ahv_backup() {
 
 do_ahv_stage() {
   if [ "$KIND" != "PE" ]; then return 0; fi
+  # scp as nutanix can write /tmp. sudo over plain ssh needs a TTY/password
+  # on this AHV; hostssh (same path as backup) does not.
   for i in $(hostips); do
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$BANNER_SRC" "$i:/tmp/DODbanner"
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" "sudo cp /tmp/DODbanner $AHV_DST; sudo chown root:root $AHV_DST"
   done
+  hostssh "sudo cp /tmp/DODbanner $AHV_DST && sudo chown root:root $AHV_DST"
 }
 
 read_ahv_ncli() {

@@ -173,8 +173,7 @@ function Install-PythonVenv {
 }
 
 function Test-OpenSsh {
-    return [bool](Get-Command ssh -ErrorAction SilentlyContinue) -and
-           [bool](Get-Command scp -ErrorAction SilentlyContinue)
+    return [bool](Get-Command ssh -ErrorAction SilentlyContinue)
 }
 
 function Test-PoshSsh {
@@ -233,7 +232,7 @@ function Invoke-PowerShellPath {
         Start-PowerShellTui
     }
 
-    Write-Host 'Neither OpenSSH (ssh/scp) nor the Posh-SSH module is available.'
+    Write-Host 'Neither OpenSSH (ssh) nor the Posh-SSH module is available.'
     Write-Host ''
     Write-Host 'DISCLAIMER' -ForegroundColor Yellow
     Write-Host '  If you continue, this launcher will:'
