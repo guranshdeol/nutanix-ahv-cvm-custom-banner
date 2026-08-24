@@ -161,7 +161,7 @@ def run_tui(root: Path) -> int:
     output_dir = root / "output"
 
     _banner("Nutanix SSH consent banner")
-    print("  PE: CVM Salt DODbanner + AHV Puppet issue.DoD (AOS before 7.6)")
+    print("  PE: CVM Salt DODbanner + AHV Puppet issue.DoD and live /etc/issue (AOS before 7.6)")
     print("  PC: CVM ncli + CVM Salt file only (no AHV)")
     print("  Jump host SSHs to one CVM; that CVM fans out with allssh/hostssh/svmips/hostips.")
 

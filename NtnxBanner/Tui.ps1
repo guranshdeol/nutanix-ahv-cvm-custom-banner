@@ -234,7 +234,7 @@ function Start-NtnxBannerTui {
     $outputDir = Join-Path $root 'output'
 
     Write-NtnxBanner 'Nutanix SSH consent banner'
-    Write-Host '  PE: CVM Salt DODbanner + AHV Puppet issue.DoD (AOS before 7.6)'
+    Write-Host '  PE: CVM Salt DODbanner + AHV Puppet issue.DoD and live /etc/issue (AOS before 7.6)'
     Write-Host '  PC: CVM ncli + CVM Salt file only (no AHV)'
     Write-Host '  Jump host SSHs to one CVM; that CVM fans out with allssh/hostssh/svmips/hostips.'
 

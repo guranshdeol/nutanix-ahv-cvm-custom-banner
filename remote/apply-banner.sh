@@ -17,6 +17,10 @@ CVM_DST="/srv/salt/security/CVM/sshd/DODbanner"
 CVM_BAK="/srv/salt/security/CVM/sshd/DODbannerbak"
 AHV_DST="/etc/puppet/modules/kvm/files/issue.DoD"
 AHV_BAK="/etc/puppet/modules/kvm/files/issue.DoD.bak"
+# sshd Banner on AHV is /etc/issue (often also /etc/issue.DoD). ncli
+# enable-banner does not recopy the Puppet source onto those live files.
+AHV_LIVE="/etc/issue"
+AHV_LIVE_DOD="/etc/issue.DoD"
 # Nested ssh/scp otherwise print the AHV pre-auth banner on stderr.
 SSH_Q="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
@@ -71,18 +75,17 @@ cvm_stage_cmd() {
 
 do_ahv_backup() {
   if [ "$KIND" != "PE" ]; then return 0; fi
-  hostssh "sudo test -f $AHV_BAK || sudo cp -a $AHV_DST $AHV_BAK"
+  hostssh "sudo test -f $AHV_BAK || sudo cp -a $AHV_DST $AHV_BAK; sudo test -f ${AHV_LIVE}.ntnxbak || sudo cp -a $AHV_LIVE ${AHV_LIVE}.ntnxbak; if sudo test -f $AHV_LIVE_DOD; then sudo test -f ${AHV_LIVE_DOD}.ntnxbak || sudo cp -a $AHV_LIVE_DOD ${AHV_LIVE_DOD}.ntnxbak; fi"
 }
 
+# Write the operator file onto Puppet source and the files sshd actually
+# serves. ncli enable-banner=true does not copy issue.DoD onto /etc/issue.
 do_ahv_stage() {
   if [ "$KIND" != "PE" ]; then return 0; fi
-  # scp as nutanix can write /tmp. sudo over plain ssh needs a TTY/password
-  # on this AHV; hostssh (same path as backup) does not.
-  for i in $(hostips); do
-    # shellcheck disable=SC2086
-    scp $SSH_Q "$BANNER_SRC" "$i:/tmp/DODbanner"
-  done
-  hostssh "sudo cp /tmp/DODbanner $AHV_DST && sudo chown root:root $AHV_DST"
+  # CVM->AHV passwordless access is hostssh. Plain ssh/scp to hostips often
+  # needs a TTY/password, and hostips can be a different NIC than hostssh.
+  b64=$(base64 -w 0 "$BANNER_SRC" 2>/dev/null || base64 "$BANNER_SRC" | tr -d '\n')
+  hostssh "printf '%s' '$b64' | base64 -d > /tmp/DODbanner && sudo cp /tmp/DODbanner $AHV_DST && sudo chown root:root $AHV_DST && sudo cp /tmp/DODbanner $AHV_LIVE && sudo cp /tmp/DODbanner $AHV_LIVE_DOD && sudo chown root:root $AHV_LIVE $AHV_LIVE_DOD && live=\$(sudo awk '/^[[:space:]]*Banner[[:space:]]/ {print \$2; exit}' /etc/ssh/sshd_config) && if [ -n \"\$live\" ] && [ \"\$live\" != none ]; then sudo cp /tmp/DODbanner \"\$live\"; sudo chown root:root \"\$live\"; fi"
 }
 
 read_ahv_ncli() {
@@ -97,10 +100,7 @@ set_ahv_banner() {
 
 verify_ahv() {
   if [ "$KIND" != "PE" ]; then return 0; fi
-  for i in $(hostips); do
-    # shellcheck disable=SC2086
-    echo "AHV $i $(ssh $SSH_Q "$i" "sudo md5sum $AHV_DST 2>/dev/null || echo missing")"
-  done
+  hostssh "sudo md5sum $AHV_DST $AHV_LIVE $AHV_LIVE_DOD 2>/dev/null || echo missing"
 }
 
 mkdir -p "$HOME/tmp"
@@ -125,8 +125,8 @@ if [ "$MODE" = "whatif" ]; then
   if [ "$KIND" = "PE" ]; then
     echo "ncli cluster edit-hypervisor-security-params enable-banner=false"
     echo "backup CVM DODbanner (allssh, or this CVM on a single-node)"
-    echo "hostssh backup AHV issue.DoD"
-    echo "stage CVM Salt + AHV Puppet (this CVM / this AHV on a single-node)"
+    echo "hostssh backup AHV issue.DoD and live /etc/issue"
+    echo "stage CVM Salt + AHV Puppet issue.DoD + live /etc/issue (sshd Banner)"
     echo "ncli enable-banner=true (CVM + AHV)"
   else
     echo "backup CVM DODbanner"
@@ -154,6 +154,10 @@ echo "=== enable CVM banner ==="
 ncli cluster edit-cvm-security-params enable-banner=true
 echo "=== enable AHV banner ==="
 set_ahv_banner true
+# ncli enable may leave /etc/issue on the previous DoD text. Recopy live
+# Banner files after the toggle so sshd shows the operator file immediately.
+echo "=== recopy AHV live Banner ==="
+do_ahv_stage
 
 echo "=== CVM ncli (after) ==="
 ncli cluster get-cvm-security-config 2>/dev/null || true
