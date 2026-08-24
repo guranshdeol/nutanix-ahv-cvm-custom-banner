@@ -104,7 +104,7 @@ function Show-NtnxClusterTable {
     Write-Host ('{0,-4} {1,-8} {2,-24} {3,-14} {4}' -f '#', 'Type', 'Name', 'AOS', 'File banner')
     Write-Host ('-' * 72)
     $i = 1
-    foreach ($t in @($Targets)) {
+    foreach ($t in (ConvertTo-NtnxArray $Targets)) {
         $gate = if ($t.Allowed) { 'ok' } else { 'REFUSE 7.6+' }
         $color = if ($t.Allowed) { 'White' } else { 'Yellow' }
         Write-Host ('{0,-4} {1,-8} {2,-24} {3,-14} {4}' -f $i, $t.Kind, $t.Name, $t.AosVersion, $gate) -ForegroundColor $color
@@ -122,22 +122,23 @@ function Read-NtnxClusterSelection {
 
     while ($true) {
         $raw = Read-NtnxRequired 'Clusters'
+        $list = ConvertTo-NtnxArray $Targets
         if ($raw.ToUpper() -eq 'ALL') {
-            return @($Targets)
+            return , $list
         }
 
         $picked = [System.Collections.Generic.List[object]]::new()
         $ok = $true
         foreach ($part in $raw.Split(',')) {
             $n = 0
-            if (-not [int]::TryParse($part.Trim(), [ref]$n) -or $n -lt 1 -or $n -gt @($Targets).Count) {
+            if (-not [int]::TryParse($part.Trim(), [ref]$n) -or $n -lt 1 -or $n -gt $list.Count) {
                 Write-Host "Bad selection: $($part.Trim())" -ForegroundColor Yellow
                 $ok = $false
                 break
             }
-            $picked.Add($Targets[$n - 1])
+            $picked.Add($list[$n - 1])
         }
-        if ($ok -and $picked.Count) { return , $picked.ToArray() }
+        if ($ok -and $picked.Count) { return , $picked }
     }
 }
 
@@ -151,11 +152,12 @@ function Read-NtnxClusterSshCreds {
     $reuseUser = $null
     $reusePass = $null
 
+    $list = ConvertTo-NtnxArray $Targets
     $i = 0
-    foreach ($t in @($Targets)) {
+    foreach ($t in $list) {
         $i++
         Write-Host ''
-        Write-Host ("[{0}/{1}] {2} ({3})  ssh {4}" -f $i, @($Targets).Count, $t.Name, $t.Kind, $t.SshHost)
+        Write-Host ("[{0}/{1}] {2} ({3})  ssh {4}" -f $i, $list.Count, $t.Name, $t.Kind, $t.SshHost)
 
         if ($reuseUser -and (Read-NtnxYesNo "  Use the same SSH user/password as the last cluster?" $true)) {
             $creds[$t.Name] = @{ User = $reuseUser; Password = $reusePass }
@@ -168,9 +170,10 @@ function Read-NtnxClusterSshCreds {
         $reuseUser = $user
         $reusePass = $pass
 
-        if ($i -lt @($Targets).Count) {
+        if ($i -lt $list.Count) {
             if (Read-NtnxYesNo '  Use these CVM creds for all remaining clusters?' $false) {
-                foreach ($rest in @($Targets)[$i..(@($Targets).Count - 1)]) {
+                for ($j = $i; $j -lt $list.Count; $j++) {
+                    $rest = $list[$j]
                     $creds[$rest.Name] = @{ User = $user; Password = $pass }
                 }
                 break
@@ -198,7 +201,7 @@ function Show-NtnxBannerReport {
     Write-NtnxBanner 'Result'
     Write-Host ('{0,-24} {1,-6} {2,-10} {3}' -f 'Cluster', 'Type', 'Status', 'Note')
     Write-Host ('-' * 72)
-    foreach ($r in @($Rows)) {
+    foreach ($r in (ConvertTo-NtnxArray $Rows)) {
         $note = [string]$r.Detail
         if ($note.Length -gt 80) { $note = $note.Substring(0, 77) + '...' }
         $color = switch ($r.Status) {
@@ -225,15 +228,15 @@ function Start-NtnxBannerTui {
 
     Write-NtnxLog "Connecting to $($pc.PcIp) ..."
     $session = New-NtnxSession -PcIp $pc.PcIp -User $pc.User -Secret $pc.Secret -AuthMode $pc.AuthMode
-    $targets = @(Get-NtnxBannerTargets -Session $session -PcFallbackIp $session.Host)
+    $targets = ConvertTo-NtnxArray (Get-NtnxBannerTargets -Session $session -PcFallbackIp $session.Host)
     if (-not $targets.Count) { throw 'No clusters discovered.' }
 
-    $selected = @(Read-NtnxClusterSelection -Targets $targets)
-    $refused = @($selected | Where-Object { -not $_.Allowed })
+    $selected = ConvertTo-NtnxArray (Read-NtnxClusterSelection -Targets $targets)
+    $refused = @(ConvertTo-NtnxArray ($selected | Where-Object { $_.PSObject.Properties['Allowed'] -and -not $_.Allowed }))
     foreach ($r in $refused) {
         Write-NtnxLog "$($r.Name): $($r.Reason)" -Level WARN
     }
-    $work = @($selected | Where-Object { $_.Allowed })
+    $work = ConvertTo-NtnxArray ($selected | Where-Object { $_.PSObject.Properties['Allowed'] -and $_.Allowed })
     if (-not $work.Count) {
         Write-NtnxLog 'Nothing left to do after the AOS 7.6+ gate.' -Level WARN
         return 0
@@ -253,6 +256,14 @@ function Start-NtnxBannerTui {
         $n++
         Write-NtnxLog "[$n/$($work.Count)] $($t.Name)"
         $c = $creds[$t.Name]
+        if (-not $c) {
+            Write-NtnxLog "No SSH credentials for $($t.Name)." -Level ERROR
+            $rows.Add([PSCustomObject]@{
+                Cluster = $t.Name; Kind = $t.Kind; AosVersion = $t.AosVersion
+                SshHost = $t.SshHost; Status = 'failed'; Detail = 'Missing SSH credentials.'
+            })
+            continue
+        }
         $row = Invoke-NtnxBannerOnCluster -Target $t -SshUser $c.User -SshPassword $c.Password -BannerFile $bannerFile -WhatIf:$whatIf
         $rows.Add($row)
         Write-NtnxLog ("  {0}" -f $row.Status)

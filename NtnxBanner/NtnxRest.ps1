@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:NtnxCandidateVersions = @('v4.0', 'v4.1', 'v4.2', 'v4.3')
+$script:NtnxJsonSerializer = $null
 
 function New-NtnxSession {
     [CmdletBinding()]
@@ -68,9 +69,36 @@ function Enable-NtnxCertificateBypass {
 
     if ($Session.IsCore) { return }
 
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-    if ($null -eq [System.Net.ServicePointManager]::ServerCertificateValidationCallback) {
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    # Desktop 5.1 / .NET Framework: a PowerShell scriptblock callback often
+    # aborts the handshake ("unexpected error occurred on a send"). Use a
+    # compiled ICertificatePolicy, same idea as Python verify=False.
+    $tls = [System.Net.SecurityProtocolType]::Tls12
+    try { $tls = $tls -bor [System.Net.SecurityProtocolType]::Tls13 } catch {}
+    [System.Net.ServicePointManager]::SecurityProtocol = $tls
+
+    if (-not ([System.Management.Automation.PSTypeName]'NtnxTrustAllCerts').Type) {
+        Add-Type -TypeDefinition @'
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public class NtnxTrustAllCerts : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) {
+        return true;
+    }
+    public static bool Validate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
+        return true;
+    }
+}
+'@
+    }
+    [System.Net.ServicePointManager]::CertificatePolicy = New-Object NtnxTrustAllCerts
+    try {
+        $method = [NtnxTrustAllCerts].GetMethod('Validate')
+        $callback = [System.Delegate]::CreateDelegate([System.Net.Security.RemoteCertificateValidationCallback], $method)
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $callback
+    }
+    catch {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
     }
 }
 
@@ -103,12 +131,19 @@ function Invoke-NtnxApi {
         TimeoutSec  = $Session.TimeoutSec
         ErrorAction = 'Stop'
     }
-    if ($Session.IsCore) { $params['SkipCertificateCheck'] = $true }
 
     $attempt = 0
     while ($true) {
         try {
-            return Invoke-RestMethod @params
+            if ($Session.IsCore) {
+                $params['SkipCertificateCheck'] = $true
+                return Invoke-RestMethod @params
+            }
+            # Desktop 5.1 Invoke-RestMethod / ConvertFrom-Json only walks two
+            # JSON levels, so v4 "data":[ clusters ] becomes one string.
+            $params['UseBasicParsing'] = $true
+            $wr = Invoke-WebRequest @params
+            return ConvertFrom-NtnxJson -Json ([string]$wr.Content)
         }
         catch {
             $status = $null
@@ -146,23 +181,39 @@ function Get-NtnxList {
         if ($OrderBy) { $query['$orderby'] = $OrderBy }
 
         try {
-            $resp = Invoke-NtnxApi -Session $Session -Path $Path -Query $query
+            $resp = Invoke-NtnxApi -Session $Session -Path $Path -Query $query -Quiet
         }
         catch {
             break
         }
 
-        $data = $null
-        if ($resp -and $resp.PSObject.Properties.Name -contains 'data') { $data = $resp.data }
-        if (-not $data) { break }
-
-        $batch = @($data)
+        $batch = ConvertTo-NtnxArray (Get-NtnxResponseData $resp)
+        if (-not $batch.Count) { break }
         foreach ($item in $batch) { $all.Add($item) }
         if ($batch.Count -lt $Limit) { break }
         $page++
     }
 
-    return , $all.ToArray()
+    return , $all
+}
+
+function Get-NtnxResponseData {
+    param($Resp)
+    $entry = Get-NtnxMapEntry -Map $Resp -Key 'data'
+    if ($entry.Found) { return $entry.Value }
+    return $null
+}
+
+function ConvertFrom-NtnxJson {
+    param([string]$Json)
+    if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
+    if ($null -eq $script:NtnxJsonSerializer) {
+        Add-Type -AssemblyName System.Web.Extensions
+        $script:NtnxJsonSerializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $script:NtnxJsonSerializer.MaxJsonLength = [int]::MaxValue
+        $script:NtnxJsonSerializer.RecursionLimit = 100
+    }
+    return $script:NtnxJsonSerializer.DeserializeObject($Json)
 }
 
 function Get-NtnxPath {

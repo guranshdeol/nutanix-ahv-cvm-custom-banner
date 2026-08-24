@@ -14,7 +14,7 @@ function Get-NtnxBannerTargets {
     $clusterPath = Get-NtnxPath -Session $Session -Namespace 'clustermgmt' -Suffix 'config/clusters'
     if (-not $clusterPath) { throw 'clustermgmt is not available.' }
 
-    $clusters = @(Get-NtnxList -Session $Session -Path $clusterPath)
+    $clusters = ConvertTo-NtnxArray (Get-NtnxList -Session $Session -Path $clusterPath)
     if (-not $clusters.Count) { throw 'No clusters returned from Prism Central.' }
 
     $targets = [System.Collections.Generic.List[object]]::new()
@@ -23,8 +23,8 @@ function Get-NtnxBannerTargets {
         $name = Get-PropText $c 'name'
         $extId = Get-Prop $c 'extId' $null
         $version = Get-PropText $c 'config.buildInfo.version'
-        $functions = @($(Get-Prop $c 'config.clusterFunction' @())) | ForEach-Object { [string]$_ }
-        $isPc = $functions -contains 'PRISM_CENTRAL'
+        $functions = foreach ($f in (ConvertTo-NtnxArray (Get-Prop $c 'config.clusterFunction' @()))) { [string]$f }
+        $isPc = @($functions) -contains 'PRISM_CENTRAL'
         $kind = if ($isPc) { 'PC' } else { 'PE' }
         $gate = Test-NtnxAosFileBannerSupported -Version $version
 
@@ -32,10 +32,11 @@ function Get-NtnxBannerTargets {
         $cvmIps = [System.Collections.Generic.List[string]]::new()
         $ahvIps = [System.Collections.Generic.List[string]]::new()
 
-        if ($extId) {
+        # PC has no PE host inventory; that GET is 400. Same fallback as Python.
+        if ($extId -and -not $isPc) {
             $hostPath = Get-NtnxPath -Session $Session -Namespace 'clustermgmt' -Suffix "config/clusters/$extId/hosts"
             if ($hostPath) {
-                foreach ($h in @(Get-NtnxList -Session $Session -Path $hostPath)) {
+                foreach ($h in (ConvertTo-NtnxArray (Get-NtnxList -Session $Session -Path $hostPath))) {
                     $cvm = Get-NtnxIpValue (Get-Prop $h 'controllerVm.externalAddress' $null)
                     $ahv = Get-NtnxIpValue (Get-Prop $h 'hypervisor.externalAddress' $null)
                     if ($cvm) { $cvmIps.Add($cvm) }
@@ -61,5 +62,5 @@ function Get-NtnxBannerTargets {
         })
     }
 
-    return , $targets.ToArray()
+    return , $targets
 }

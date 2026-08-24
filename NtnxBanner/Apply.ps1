@@ -41,12 +41,13 @@ function Invoke-NtnxBannerOnCluster {
         $prep = Invoke-NtnxCvmCommand -HostName $Target.SshHost -User $SshUser -Password $SshPassword -Command 'mkdir -p "$HOME/tmp" && echo NTNX_SSH_OK'
         $prepOut = [string]$prep.Output
         if ($prep.ExitStatus -ne 0 -or $prepOut -notmatch 'NTNX_SSH_OK') {
-            $result.Detail = "SSH failed: $prepOut"
+            $prepErr = ''
+            if ($prep.PSObject.Properties['Error']) { $prepErr = [string]$prep.Error }
+            $result.Detail = 'SSH failed: ' + ((@($prepOut, $prepErr) | Where-Object { $_ }) -join "`n")
             return [PSCustomObject]$result
         }
 
-        # Expand $HOME on the CVM. Do not build a path from ssh client stderr
-        # (host-key warning + pre-auth banner are merged by 2>&1).
+        # Remote paths expand $HOME on the CVM. Do not parse ssh client stderr.
         Copy-NtnxFileToCvm -HostName $Target.SshHost -User $SshUser -Password $SshPassword -LocalPath $BannerFile -RemotePath '$HOME/tmp/DODbanner'
         Copy-NtnxFileToCvm -HostName $Target.SshHost -User $SshUser -Password $SshPassword -LocalPath $remoteScript -RemotePath '$HOME/tmp/apply-banner.sh'
 
@@ -55,9 +56,12 @@ function Invoke-NtnxBannerOnCluster {
             'bash -lc ''chmod +x "$HOME/tmp/apply-banner.sh" && bash "$HOME/tmp/apply-banner.sh" ' + $mode + ' ' + $Target.Kind + ''''
         )
 
-        $result.Detail = $run.Output
+        $result.Detail = [string]$run.Output
         if ($run.ExitStatus -eq 0) {
             $result.Status = $(if ($WhatIf) { 'whatif' } else { 'changed' })
+        }
+        elseif ($run.PSObject.Properties['Error'] -and $run.Error) {
+            $result.Detail = (@($run.Output, $run.Error) | Where-Object { $_ }) -join "`n"
         }
         return [PSCustomObject]$result
     }

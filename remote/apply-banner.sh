@@ -17,6 +17,13 @@ CVM_DST="/srv/salt/security/CVM/sshd/DODbanner"
 CVM_BAK="/srv/salt/security/CVM/sshd/DODbannerbak"
 AHV_DST="/etc/puppet/modules/kvm/files/issue.DoD"
 AHV_BAK="/etc/puppet/modules/kvm/files/issue.DoD.bak"
+# Nested ssh/scp otherwise print the AHV pre-auth banner on stderr.
+SSH_Q="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+
+cvm_md5() {
+  # Salt file is root:root; nutanix md5sum looks like "missing".
+  sudo md5sum "$CVM_DST" 2>/dev/null || echo "CVM file missing"
+}
 
 cvm_ip_list() {
   if command -v svmips >/dev/null 2>&1; then
@@ -39,7 +46,8 @@ cvm_backup_cmd() {
   fi
   if [ "$(cvm_count)" -gt 1 ]; then
     for i in $(cvm_ip_list); do
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" \
+      # shellcheck disable=SC2086
+      ssh $SSH_Q "$i" \
         "sudo test -f $CVM_BAK || sudo cp -a $CVM_DST $CVM_BAK"
     done
     return
@@ -50,8 +58,10 @@ cvm_backup_cmd() {
 cvm_stage_cmd() {
   if [ "$(cvm_count)" -gt 1 ]; then
     for i in $(cvm_ip_list); do
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$BANNER_SRC" "$i:$HOME/tmp/DODbanner"
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" "sudo cp \$HOME/tmp/DODbanner $CVM_DST; sudo chown root:root $CVM_DST"
+      # shellcheck disable=SC2086
+      scp $SSH_Q "$BANNER_SRC" "$i:$HOME/tmp/DODbanner"
+      # shellcheck disable=SC2086
+      ssh $SSH_Q "$i" "sudo cp \$HOME/tmp/DODbanner $CVM_DST; sudo chown root:root $CVM_DST"
     done
     return
   fi
@@ -69,7 +79,8 @@ do_ahv_stage() {
   # scp as nutanix can write /tmp. sudo over plain ssh needs a TTY/password
   # on this AHV; hostssh (same path as backup) does not.
   for i in $(hostips); do
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$BANNER_SRC" "$i:/tmp/DODbanner"
+    # shellcheck disable=SC2086
+    scp $SSH_Q "$BANNER_SRC" "$i:/tmp/DODbanner"
   done
   hostssh "sudo cp /tmp/DODbanner $AHV_DST && sudo chown root:root $AHV_DST"
 }
@@ -87,7 +98,8 @@ set_ahv_banner() {
 verify_ahv() {
   if [ "$KIND" != "PE" ]; then return 0; fi
   for i in $(hostips); do
-    echo "AHV $i $(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" "md5sum $AHV_DST 2>/dev/null || echo missing")"
+    # shellcheck disable=SC2086
+    echo "AHV $i $(ssh $SSH_Q "$i" "sudo md5sum $AHV_DST 2>/dev/null || echo missing")"
   done
 }
 
@@ -104,7 +116,7 @@ ncli cluster get-cvm-security-config 2>/dev/null || echo "CVM_NCLI_UNAVAILABLE"
 echo "=== AHV ncli (before) ==="
 read_ahv_ncli
 echo "=== checksums (before) ==="
-md5sum "$CVM_DST" 2>/dev/null || echo "CVM file missing"
+cvm_md5
 verify_ahv
 
 if [ "$MODE" = "whatif" ]; then
@@ -148,13 +160,14 @@ ncli cluster get-cvm-security-config 2>/dev/null || true
 echo "=== AHV ncli (after) ==="
 read_ahv_ncli
 echo "=== checksums (after) ==="
-md5sum "$CVM_DST" 2>/dev/null || echo "CVM file missing"
+cvm_md5
 if [ "$(cvm_count)" -gt 1 ]; then
   for i in $(cvm_ip_list); do
-    echo "CVM $i $(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$i" "md5sum $CVM_DST 2>/dev/null || echo missing")"
+    # shellcheck disable=SC2086
+    echo "CVM $i $(ssh $SSH_Q "$i" "sudo md5sum $CVM_DST 2>/dev/null || echo missing")"
   done
 else
-  echo "CVM this-node $(md5sum "$CVM_DST" 2>/dev/null || echo missing)"
+  echo "CVM this-node $(cvm_md5)"
 fi
 verify_ahv
 echo "=== DONE ==="

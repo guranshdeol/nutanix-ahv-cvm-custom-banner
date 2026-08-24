@@ -20,6 +20,68 @@ function Write-NtnxLog {
     }
 }
 
+function ConvertTo-NtnxArray {
+    <#
+        Return a List[object] so .Count / foreach survive Desktop 5.1.
+
+        Returning Object[] with one item is unwrapped on assignment, then
+        StrictMode throws "The property 'Count' cannot be found". A List is
+        one object (not unrolled) when returned with a leading comma.
+    #>
+    param($Value)
+
+    $list = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $Value) { return , $list }
+
+    # One Dictionary/Hashtable is a single record. @($dict) would enumerate keys.
+    if ($Value -is [System.Collections.IDictionary]) {
+        $list.Add($Value)
+        return , $list
+    }
+
+    $items = @($Value)
+    $guard = 0
+    while (
+        $guard -lt 5 -and
+        $items.Count -eq 1 -and
+        $null -ne $items[0] -and
+        $items[0] -is [System.Collections.IList] -and
+        $items[0] -isnot [string]
+    ) {
+        $items = @($items[0])
+        $guard++
+    }
+    foreach ($item in $items) { $list.Add($item) }
+    return , $list
+}
+
+function Get-NtnxMapEntry {
+    <#
+        Read one key from a Hashtable / Dictionary without calling .Contains().
+        JavaScriptSerializer returns Dictionary<string,object>. In Windows
+        PowerShell 5.1, .Contains() is an explicit IDictionary method and
+        method binding throws "Cannot find an overload for Contains".
+    #>
+    param($Map, [string]$Key)
+
+    if ($null -eq $Map) {
+        return [PSCustomObject]@{ Found = $false; Value = $null }
+    }
+    if ($Map.PSObject.Properties['Keys']) {
+        foreach ($k in @($Map.Keys)) {
+            if ([string]$k -eq $Key) {
+                return [PSCustomObject]@{ Found = $true; Value = $Map[$k] }
+            }
+        }
+        return [PSCustomObject]@{ Found = $false; Value = $null }
+    }
+    $prop = $Map.PSObject.Properties[$Key]
+    if ($prop) {
+        return [PSCustomObject]@{ Found = $true; Value = $prop.Value }
+    }
+    return [PSCustomObject]@{ Found = $false; Value = $null }
+}
+
 function Get-Prop {
     [CmdletBinding()]
     param(
@@ -31,14 +93,9 @@ function Get-Prop {
     $current = $Object
     foreach ($segment in $Path.Split('.')) {
         if ($null -eq $current) { return $Default }
-        if ($current -is [System.Collections.IDictionary]) {
-            if (-not $current.Contains($segment)) { return $Default }
-            $current = $current[$segment]
-            continue
-        }
-        $prop = $current.PSObject.Properties[$segment]
-        if (-not $prop) { return $Default }
-        $current = $prop.Value
+        $entry = Get-NtnxMapEntry -Map $current -Key $segment
+        if (-not $entry.Found) { return $Default }
+        $current = $entry.Value
     }
     if ($null -eq $current) { return $Default }
     return $current
@@ -53,8 +110,9 @@ function Get-PropText {
 
     $value = Get-Prop $Object $Path $null
     if ($null -eq $value) { return $Default }
-    if ($value -is [array]) {
-        $joined = ($value | ForEach-Object { [string]$_ }) -join ', '
+    # JavaScriptSerializer uses ArrayList, which is IList but not [array].
+    if ($value -is [System.Collections.IList]) {
+        $joined = (@($value) | ForEach-Object { [string]$_ }) -join ', '
         if ([string]::IsNullOrWhiteSpace($joined)) { return $Default }
         return $joined
     }

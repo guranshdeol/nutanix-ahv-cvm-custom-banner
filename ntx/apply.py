@@ -48,7 +48,10 @@ def _run(client: paramiko.SSHClient, command: str, timeout: int = 300) -> tuple[
                 out = stdout.read().decode("utf-8", errors="replace")
                 err = stderr.read().decode("utf-8", errors="replace")
                 code = stdout.channel.recv_exit_status()
-                return code, (out + err).strip()
+                text = out.strip()
+                if code != 0 and err.strip():
+                    text = (text + "\n" + err.strip()).strip()
+                return code, text
             finally:
                 stdin.close()
                 stdout.close()
