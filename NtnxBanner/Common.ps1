@@ -20,9 +20,42 @@ function Write-NtnxLog {
     }
 }
 
+function Add-NtnxEnumerated {
+    <#
+        Copy IList items with GetEnumerator/MoveNext.
+
+        Do not foreach / @() a Generic.List: Desktop 5.1 treats a 0- or 1-item
+        list as one object, then StrictMode throws on .Name / .Allowed.
+        Do not use IEnumerable here: a PSCustomObject must stay one record.
+    #>
+    param(
+        [Parameter(Mandatory)][System.Collections.IList]$Target,
+        $Source
+    )
+
+    if ($null -eq $Source) { return }
+    if ($Source -is [string] -or $Source -is [System.Collections.IDictionary]) {
+        [void]$Target.Add($Source)
+        return
+    }
+    if ($Source -is [System.Collections.IList]) {
+        $enum = ([System.Collections.IEnumerable]$Source).GetEnumerator()
+        try {
+            while ($enum.MoveNext()) {
+                [void]$Target.Add($enum.Current)
+            }
+        }
+        finally {
+            if ($enum -is [System.IDisposable]) { $enum.Dispose() }
+        }
+        return
+    }
+    [void]$Target.Add($Source)
+}
+
 function ConvertTo-NtnxArray {
     <#
-        Return a List[object] so .Count / foreach survive Desktop 5.1.
+        Return a List[object] so .Count survives Desktop 5.1.
 
         Returning Object[] with one item is unwrapped on assignment, then
         StrictMode throws "The property 'Count' cannot be found". A List is
@@ -33,26 +66,64 @@ function ConvertTo-NtnxArray {
     $list = [System.Collections.Generic.List[object]]::new()
     if ($null -eq $Value) { return , $list }
 
-    # One Dictionary/Hashtable is a single record. @($dict) would enumerate keys.
+    # One Dictionary/Hashtable is a single record. Enumerating it yields keys.
     if ($Value -is [System.Collections.IDictionary]) {
         $list.Add($Value)
         return , $list
     }
 
-    $items = @($Value)
-    $guard = 0
-    while (
-        $guard -lt 5 -and
-        $items.Count -eq 1 -and
-        $null -ne $items[0] -and
-        $items[0] -is [System.Collections.IList] -and
-        $items[0] -isnot [string]
-    ) {
-        $items = @($items[0])
-        $guard++
+    Add-NtnxEnumerated -Target $list -Source $Value
+
+    if ($list.Count -eq 1) {
+        $only = $null
+        $enum = $list.GetEnumerator()
+        try {
+            if ($enum.MoveNext()) { $only = $enum.Current }
+        }
+        finally {
+            if ($enum -is [System.IDisposable]) { $enum.Dispose() }
+        }
+        if (
+            $null -ne $only -and
+            $only -is [System.Collections.IList] -and
+            $only -isnot [string] -and
+            $only -isnot [System.Collections.IDictionary]
+        ) {
+            $list.Clear()
+            Add-NtnxEnumerated -Target $list -Source $only
+        }
     }
-    foreach ($item in $items) { $list.Add($item) }
     return , $list
+}
+
+function Get-NtnxListItem {
+    # Generic.List indexer is unreliable in Desktop 5.1. Walk with MoveNext.
+    param($List, [int]$Index)
+
+    if ($Index -lt 0) { return $null }
+    $items = ConvertTo-NtnxArray $List
+    if ($Index -ge $items.Count) { return $null }
+
+    $i = 0
+    $enum = $items.GetEnumerator()
+    try {
+        while ($enum.MoveNext()) {
+            if ($i -eq $Index) { return $enum.Current }
+            $i++
+        }
+    }
+    finally {
+        if ($enum -is [System.IDisposable]) { $enum.Dispose() }
+    }
+    return $null
+}
+
+function Get-NtnxMember {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($prop) { return $prop.Value }
+    return $null
 }
 
 function Get-NtnxMapEntry {
